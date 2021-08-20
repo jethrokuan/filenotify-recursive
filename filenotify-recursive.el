@@ -62,7 +62,7 @@ a `fnr--watch' struct.")
             (substring rnd 18 20)
             (substring rnd 20 32))))
 
-(defun fnr--subdirectories-recursively (dir &optional ignore-hidden predicate follow-symlinks)
+(defun fnr--subdirectories-recursively (dir &optional regexp predicate follow-symlinks)
   "Return list of subdirectories under directory DIR.
 This function works recursively.  Files are returned in \"depth
 first\" order, and files from each directory are sorted in
@@ -70,7 +70,7 @@ alphabetical order.  Each file name appears in the returned list
 in its absolute form.
 
 
-If IGNORE-HIDDEN, skip hidden directories.
+If REGEXP, when the directory matches REGEXP it is skipped.
 
 PREDICATE can be either nil (which means that all subdirectories
 of DIR are descended into), t (which means that subdirectories that
@@ -86,9 +86,8 @@ recursion."
     (dolist (file (sort (file-name-all-completions "" dir)
                         'string<))
       (unless (or (member file '("./" "../"))
-                  (and ignore-hidden
-                       (string-equal (substring file 0 1)
-                                     ".")))
+                  (and regexp
+                       (string-match regexp file)))
         (when (directory-name-p file)
           (let* ((leaf (substring file 0 (1- (length file))))
                  (full-file (concat dir "/" leaf)))
@@ -119,7 +118,7 @@ recursion."
   callback)
 
 ;;;
-(defun fnr-add-watch (dir flags callback &optional ignore-hidden)
+(defun fnr-add-watch (dir flags callback &optional regexp)
   "Create a new recursive watcher for filesystem events to DIR.
 Use `fnr-rm-watch' to cancel the watch.
 
@@ -152,9 +151,9 @@ following:
 
 FILE is the name of the file whose event is being reported.
 
-If IGNORE-HIDDEN is non-nil, do not watch hidden directories."
+If REGEXP is non-nil, do not watch directories matching REGEXP."
   (let* ((uuid (fnr--uuid))
-         (all-dirs (fnr--subdirectories-recursively dir ignore-hidden))
+         (all-dirs (fnr--subdirectories-recursively dir regexp))
          (wrapped-callback (fnr--wrap-callback uuid callback))
          (descs (mapcar (lambda (dir)
                           (file-notify-add-watch dir flags wrapped-callback))
