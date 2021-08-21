@@ -1,6 +1,6 @@
 ;;; filenotify-recursive.el --- filenotify, but recursive -*- coding: utf-8; lexical-binding: t; -*-
 
-;; Copyright © 2021 Jethro Kuan <jethrokuan95@gmail.com> and contributors.
+;; Copyright © 2021 Jethro Kuan <jethrokuan95@gmail.com> and contributors
 
 ;; Author: Jethro Kuan <jethrokuan95@gmail.com>
 ;; URL: https://github.com/jethrokuan/filenotify-recursive
@@ -207,7 +207,7 @@ UUID is the uuid of the fnr-watcher."
     (funcall callback event)))
 
 (defun fnr--update-directory-watchers (uuid event)
-  "According to `filenotify' EVENT update directory watched by UUID watcher.
+  "Update directories watched by UUID watcher by reacting to `filenotify' EVENT.
 UUID corresponds to recursive watcher present in `fnr-descriptors'."
   (let ((watcher (gethash uuid fnr-descriptors)))
     (cl-destructuring-bind (_ action &rest files) event
@@ -218,7 +218,7 @@ UUID corresponds to recursive watcher present in `fnr-descriptors'."
                watcher files)))))
 
 (defun fnr--update-created-directory (watcher root)
-  "Using recursive WATCHER, start recursively watch new ROOT directory."
+  "Using the recursive WATCHER, start watching new ROOT and its subdirectories."
   (let* ((new-dirs (fnr--subdirectories-recursively root (fnr--watch-regexp watcher)))
          (new-descs (fnr--add-watchers new-dirs
                                        (fnr--watch-flags watcher)
@@ -227,7 +227,7 @@ UUID corresponds to recursive watcher present in `fnr-descriptors'."
     (fnr--update-descs watcher (nconc new-descs old-descs))))
 
 (defun fnr--update-stopped-directory (watcher root)
-  "Using recursive WATCHER, stop watching no longer needed ROOT directory."
+  "Using the recursive WATCHER, stop watching ROOT and its subdirectories."
   (let* ((old-descs (fnr--watch-descs watcher))
          (new-descs (cl-loop for (dir . desc) in old-descs
                              if (string-prefix-p root dir)
@@ -236,7 +236,7 @@ UUID corresponds to recursive watcher present in `fnr-descriptors'."
     (fnr--update-descs watcher new-descs)))
 
 (defun fnr--update-renamed-directory (watcher old-name new-name)
-  "Using recursive WATCHER, update watchers from OLD-NAME to NEW-NAME directory."
+  "Using the recursive WATCHER, update watching from OLD-NAME to NEW-NAME."
   (fnr--update-stopped-directory watcher old-name)
   (fnr--update-created-directory watcher new-name))
 
