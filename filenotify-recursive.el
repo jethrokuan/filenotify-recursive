@@ -1,6 +1,6 @@
 ;;; filenotify-recursive.el --- filenotify, but recursive -*- coding: utf-8; lexical-binding: t; -*-
 
-;; Copyright © 2020-2021 Jethro Kuan <jethrokuan95@gmail.com>
+;; Copyright © 2021 Jethro Kuan <jethrokuan95@gmail.com> and contributors
 
 ;; Author: Jethro Kuan <jethrokuan95@gmail.com>
 ;; URL: https://github.com/jethrokuan/filenotify-recursive
@@ -27,7 +27,8 @@
 
 ;;; Commentary:
 ;;
-;;  This is an extension of the filenotify library, making it apply recursively
+;;  This is an extension of the built-in filenotify library, making it apply
+;;  recursively. It also maintains recursive watchers through the session.
 ;;
 ;;; Code:
 (require 'filenotify)
@@ -111,11 +112,37 @@ recursion."
 
 (cl-defstruct (fnr--watch (:constructor fnr--watch-create)
                           (:copier nil))
-  "Internal struct for managing filenotify recursive watchers."
+  "Internal struct for managing filenotify recursive watchers.
+UUID is a unique identifier string that's used as a key in
+`fnr-descriptors'.
+
+FLAGS, CALLBACK and REGEXP are the same as in `fnr-add-watch'
+that used by each of the watcher.
+
+DESCS is a list of cons cells, where each `car' corresonds to the
+currently watched directory and `cdr' to descriptor returned by
+each `filenotify' watcher to watch such directory."
   uuid
-  descs
   flags
-  callback)
+  regexp
+  callback
+  descs)
+
+(defun fnr--add-watchers (dirs flags callback)
+  "Add file watcher with FLAGS and CALLBACK to each directory in DIRS.
+Return back a list of descs cells (directory . descriptor)."
+  (mapcar (lambda (dir)
+            (cons dir (file-notify-add-watch dir flags callback)))
+          dirs))
+
+(defun fnr--rm-watchers (descs)
+  "Remove file watcher from a list of DESCS (directory . descriptor) cells."
+  (dolist (cell descs) (file-notify-rm-watch (cdr cell))))
+
+(defun fnr--update-descs (watcher descs)
+  "Set new DESCS for recursive WATCHER and update it in `fnr-descriptors'."
+  (setf (fnr--watch-descs watcher) descs)
+  (puthash (fnr--watch-uuid watcher) watcher fnr-descriptors))
 
 ;;;
 (defun fnr-add-watch (dir flags callback &optional regexp)
@@ -155,12 +182,11 @@ If REGEXP is non-nil, do not watch directories matching REGEXP."
   (let* ((uuid (fnr--uuid))
          (all-dirs (fnr--subdirectories-recursively dir regexp))
          (wrapped-callback (fnr--wrap-callback uuid callback))
-         (descs (mapcar (lambda (dir)
-                          (file-notify-add-watch dir flags wrapped-callback))
-                        all-dirs))
+         (descs (fnr--add-watchers all-dirs flags wrapped-callback))
          (watcher (fnr--watch-create :uuid uuid
                                      :flags flags
                                      :descs descs
+                                     :regexp regexp
                                      :callback wrapped-callback)))
     (puthash uuid watcher fnr-descriptors)
     uuid))
@@ -169,8 +195,7 @@ If REGEXP is non-nil, do not watch directories matching REGEXP."
   "Remove recursive watcher by UUID."
   (let ((watcher (or (gethash uuid fnr-descriptors)
                      (user-error "No watcher with id %s" uuid))))
-    (dolist (desc (fnr--watch-descs watcher))
-      (file-notify-rm-watch desc))
+    (fnr--rm-watchers (fnr--watch-descs watcher))
     (remhash uuid fnr-descriptors)
     uuid))
 
@@ -178,34 +203,63 @@ If REGEXP is non-nil, do not watch directories matching REGEXP."
   "Wraps the user-provided CALLBACK to include keeping track of new change.
 UUID is the uuid of the fnr-watcher."
   (lambda (event)
-    (funcall #'fnr--callback uuid event)
+    (funcall #'fnr--update-directory-watchers uuid event)
     (funcall callback event)))
 
-(defun fnr--callback (uuid event)
-  "Callback that handles watching new directories.
-UUID is the id corresponding to the recursive watcher. This ID
-should be present in `fnr-descriptors.' EVENT is an event from
-`filenotify'."
-  (pcase event
-    (`(,_ created ,file)
-     (when (file-directory-p file)
-       (let* ((watcher (gethash uuid fnr-descriptors))
-              (new-desc (file-notify-add-watch file
-                                               (fnr--watch-flags watcher)
-                                               (fnr--watch-callback watcher))))
-         (setf (fnr--watch-descs watcher) (push new-desc (fnr--watch-descs watcher)))
-         (puthash uuid watcher fnr-descriptors))))
-    (`(,desc stopped ,_)
-     (let ((watcher (gethash uuid fnr-descriptors)))
-       (setf (fnr--watch-descs watcher) (delete desc (fnr--watch-descs watcher)))
-       (puthash uuid watcher fnr-descriptors)))))
+(defun fnr--update-directory-watchers (uuid event)
+  "Update directories watched by UUID watcher by reacting to `filenotify' EVENT.
+UUID corresponds to recursive watcher present in `fnr-descriptors'."
+  (let ((watcher (gethash uuid fnr-descriptors)))
+    (cl-destructuring-bind (_ action &rest files) event
+      (when (and (memq action '(created stopped renamed))
+                 (cl-loop for f in files
+                          when (fnr--directory-actionable-p watcher f) return t))
+        (apply (intern (format "fnr--update-%s-directory" action))
+               watcher files)))))
+
+(defun fnr--update-created-directory (watcher root)
+  "Using the recursive WATCHER, start watching new ROOT and its subdirectories."
+  (let* ((new-dirs (fnr--subdirectories-recursively root (fnr--watch-regexp watcher)))
+         (new-descs (fnr--add-watchers new-dirs
+                                       (fnr--watch-flags watcher)
+                                       (fnr--watch-callback watcher)))
+         (old-descs (fnr--watch-descs watcher)))
+    (fnr--update-descs watcher (nconc new-descs old-descs))))
+
+(defun fnr--update-stopped-directory (watcher root)
+  "Using the recursive WATCHER, stop watching ROOT and its subdirectories."
+  (let* ((old-descs (fnr--watch-descs watcher))
+         (new-descs (cl-loop for (dir . desc) in old-descs
+                             if (string-prefix-p root dir)
+                             do (file-notify-rm-watch desc)
+                             else collect (cons dir desc))))
+    (fnr--update-descs watcher new-descs)))
+
+(defun fnr--update-renamed-directory (watcher old-name new-name)
+  "Using the recursive WATCHER, update watching from OLD-NAME to NEW-NAME."
+  (fnr--update-stopped-directory watcher old-name)
+  (fnr--update-created-directory watcher new-name))
+
+(defun fnr--directory-watched-p (watcher directory)
+  "Return t if DIRECTORY is watched by recursive WATCHER, else nil."
+  (cl-loop for (dir . _desc) in (fnr--watch-descs watcher)
+           when (string= dir directory) return t))
+
+(defun fnr--directory-actionable-p (watcher directory)
+  "Check whether WATCHER can react to DIRECTORY with an action."
+  (if (file-directory-p directory)
+      (not (string-match-p (fnr--watch-regexp watcher)
+                           (file-name-nondirectory directory)))
+    ;; Directory might no longer exist, but can still be watched, in which case
+    ;; it's still actionable.
+    (fnr--directory-watched-p watcher directory)))
 
 (defun fnr-clear-all ()
   "Clear all recursive filenotify watches."
   (interactive)
   (maphash (lambda (_uuid watcher)
-             (dolist (desc (fnr--watch-descs watcher))
-               (file-notify-rm-watch desc))) fnr-descriptors)
+             (fnr--rm-watchers (fnr--watch-descs watcher)))
+           fnr-descriptors)
   (setq fnr-descriptors (make-hash-table :test 'equal)))
 
 (provide 'filenotify-recursive)
